@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# This is a fan/temperature helper for platforms that need 'ectool', like the
+# AMD Framework laptop and Google Chromebooks.
+#
+# This was born out of pure frustration and was hacked together in a few hours. 
+# Don't judge me for this ugly mess. Judge Google for the clusterfuck that is 
+# ectool instead.
+#
+# By gammy
+
+# Set a default conversion unit if not specified and not set in the shell
+[ -z "$FRAMEWORK_TEMPS_UNIT" ] && FRAMEWORK_TEMPS_UNIT=C
+
+usage() {
+    local me=$(basename $0)
+    cat << EOF
+An ectool wrapper to simplify fan / temperature reading and configuration.
+
+It displays and accepts temperature parameters in Celsius, Fahrenheit or Kelvin 
+and doesn't force you to set *all* the bloody thermal parameters every time
+you want to change a single setting. Unlike 'ectool' that was clearly written
+to be used solely by robots, this script tries to make its use more appropriate 
+for human beings.
+
+A temperature parameter that ends with K, C or F will be auto-converted.
+The 'show', 'watch' and 'limit' options also accept a unit as an argument.
+The environment variable FRAMEWORK_TEMPS_UNIT can be overridden to change the 
+default unit; it's currently set to $FRAMEWORK_TEMPS_UNIT.
+
+When run without options, 'show \$FRAMEWORK_TEMPS_UNIT' is issued.
+
+Usage:
+  $me <watch|show|limits|set> [options] [option] [..]
+
+Options:
+  show    Show the current sensor temperatures, fan speed(s) and common limits.
+  watch   Same as 'show' but runs in a loop a la 'watch'.
+  limits  Show the thermal parameters/values for warn, high, halt, off and max.
+  set     Set fan or sensor parameters. The syntax is one of:
+          fan    <speed in RPM or 'auto'>
+          sensor <sensor number> <warn|high|halt|off|max> <degrees[unit]>
+
+Examples:
+    $me show
+    $me set fan 5000
+    $me set fan auto
+    $me set sensor 1 warn 90C
+    $me watch K
+    $me limits C
+ 
+When the fan speed is set to 'auto', the firmware sets the fan duty cycle
+with the following formula clamped between 0 and 100:
+  100 * (Temperature - Fan Off) / (Fan Max - Fan Off)
+Which seems like a pretty stupid formula if you ask me, but it is what it is.
+The parameters in this formula can be viewed with '$me limits'.
+
+EOF
+}
+
+sep_val_unit() {
+    local input=$1
+    local last=${input: -1}
+    local output=${input::-1}
+
+    case $last in
+        c|C) unit=C;;
+        f|F) unit=F;;
+        k|K) unit=K;;
+        *) unit="$FRAMEWORK_TEMPS_UNIT"; output=$input;;
+    esac
+    echo "$output $unit"
+}
+
+unit_to_kelvin() {
+    local val=$1
+    local unit=$2
+    local kelvin=$val # Assume input is kelvin
+
+    case $unit in
+        c|C) val=`echo "273.15 + $val"              | bc -l`;;
+        f|F) val=`echo "273.15 + ($val - 32) * 5/9" | bc -l`;;
+        k|K) true ;;
+        *) true ;;
+    esac
+
+    # ectool doesn't like decimals, so we chop them off completely.
+    local dec_places=0 # Limit output to 'scale' n decimal places
+    echo "scale=$dec_places; $val*10/10" | bc -l
+}
+
+kelvin_to_unit() {
+    local kelvin=$1
+    local unit=$2
+
+    case $unit in
+        c|C) kelvin=`echo " $kelvin - 273.15"             | bc -l`;;
+        f|F) kelvin=`echo "($kelvin - 273.15) * 9/5 + 32" | bc -l`;;
+        k|K) ;;
+        *) ;;
+    esac
+
+    local dec_places=1 # Limit output to n decimal places
+    echo "scale=$dec_places; $kelvin*10/10" | bc -l
+}
+
+thermal_set() {
+    local sensor=$1
+    local item=$2
+
+    local val_unit=(`sep_val_unit $3`)
+    local val=${val_unit[0]}
+    local unit=${val_unit[1]}
+    local val_k=$(unit_to_kelvin "$val" "$unit")
+
+    case "$item" in
+        warn) index=1 ;;
+        high) index=2 ;;
+        halt)
+            echo "Careful: if you mess up the temperature for halt, \
+your computer might instantly shut off";
+            echo "PRESS ^C TO CANCEL OR RETURN TO CONTINUE"
+            read
+            index=3 ;;
+        off) index=4 ;;
+        max) index=5 ;;
+        *)
+            usage
+            echo "Invalid item: '$item'"
+            exit 1
+            ;;
+    esac
+
+    echo "Old:"
+    thermal_conv $unit
+
+    local cols=($(sudo ectool thermalget | head -n-1 | tail -n+2 \
+        | grep "^\s*${sensor}\s"))
+    local cols_old=(${cols[@]})
+    local oldval=${cols[$index]}
+
+    if [ "$oldval" = "$val_k" ]; then
+        echo "$item on sensor $sensor is already set to $val_k K ($val $unit)"
+        return
+    fi
+
+    cols[$index]=$val_k
+
+    local k_warn=${cols[1]}
+    local k_high=${cols[2]}
+    local k_halt=${cols[3]}
+    local k_fan_off=${cols[4]}
+    local k_fan_max=${cols[5]}
+
+    # UGHhhhhhh you need to pass all the parameters! Come ON!
+    # Usage: thermalset sensor warn [high [shutdown [fan_off [fan_max]]]]
+    echo
+    echo "Changing $item on sensor $sensor from $oldval K to $val_k K ($val $unit)"
+
+    echo "> ectool thermalset $sensor $k_warn $k_high $k_halt $k_fan_off $k_fan_max"
+    sudo ectool thermalset $sensor $k_warn $k_high $k_halt $k_fan_off $k_fan_max
+
+    echo
+    echo "New:"
+    thermal_conv $unit
+}
+
+thermal_conv() {
+    local unit=$1
+    [ -z "$unit" ] && unit=$FRAMEWORK_TEMPS_UNIT
+
+    local thermalinfo=$(mktemp)
+    local thermalinfoc=$(mktemp)
+
+    echo "> ectool thermalget [then reformatting]"
+    sudo ectool thermalget > "$thermalinfo"
+
+    cat "$thermalinfo" | head -n-1 | tail -n+2 | while read line; do
+        cols=($line)
+        sensor=${cols[0]}
+        k_warn=${cols[1]}
+        k_high=${cols[2]}
+        k_halt=${cols[3]}
+        k_fan_off=${cols[4]}
+        k_fan_max=${cols[5]}
+        name=${cols[6]}
+
+        u_warn=$(kelvin_to_unit "$k_warn" "$unit")
+        u_high=$(kelvin_to_unit "$k_high" "$unit")
+        u_halt=$(kelvin_to_unit "$k_halt" "$unit")
+        u_fan_off=$(kelvin_to_unit "$k_fan_off" "$unit")
+        u_fan_max=$(kelvin_to_unit "$k_fan_max" "$unit")
+
+        echo "$sensor ($name),\
+${k_warn} / ${u_warn},\
+${k_high} / ${u_high},\
+${k_halt} / ${u_halt},\
+${k_fan_off} / ${u_fan_off},\
+${k_fan_max} / ${u_fan_max}" >> "$thermalinfoc"
+
+    done
+
+    rm "$thermalinfo"
+
+    column -t -s ',' \
+           -C name="Sensor" \
+           -C name="Warn (K/$unit)" \
+           -C name="High (K/$unit)" \
+           -C name="Halt (K/$unit)" \
+           -C name="Fan Off (K/$unit)" \
+           -C name="Fan Max (K/$unit)" \
+           "$thermalinfoc"
+
+    rm "$thermalinfoc"
+}
+
+temps_all()
+{
+    local unit=$1
+    [ -z "$unit" ] && unit=$FRAMEWORK_TEMPS_UNIT
+
+    echo "> ectool temps all [then reformatting]"
+    local tempinfo=$(mktemp)
+    local index=0
+
+    # Parse the mangled inconsistent mess that ectool outputs
+    sudo ectool temps all | tail -n+2 | sed 's/ and / /' | while read line; do
+        cols=($line)
+          name=${cols[0]}
+        temp_k=${cols[1]}
+        # temp_u=${cols[4]} # Omg 'ectool temps' converts to C for us! Discard.
+        temp_u=$(kelvin_to_unit "$temp_k" "$unit")
+         ratio=${cols[6]}
+         off_k=${cols[7]//[!0-9]}
+         max_k=${cols[9]//[!0-9]}
+        off_u=$(kelvin_to_unit "$off_k" "$unit")
+        max_u=$(kelvin_to_unit "$max_k" "$unit")
+        echo "$index ($name),\
+$temp_k / $temp_u,$ratio,\
+$off_k / $off_u,\
+$max_k / $max_u" >> $tempinfo
+        let index=$index+1 # 'ectool temps' neglects to print index, so -__-
+    done
+
+    column -t -s ',' \
+           -C name="Sensor" \
+           -C name="Temperature (K/$unit)" \
+           -C name="Fan Speed" \
+           -C name="Fan Off (K/$unit)" \
+           -C name="Fan Max (K/$unit)" \
+           "$tempinfo"
+
+    rm $tempinfo
+
+    echo
+    echo "> ectool pwmgetfanrpm all"
+    echo -n "$(sudo ectool pwmgetfanrpm all)     "
+    echo
+}
+
+for dep in ectool column sudo bc mktemp; do
+    if ! which $dep > /dev/null 2>&1; then
+        deps_missing=1
+        echo "I need '$dep' to work." >&2
+    fi
+done
+
+[ -n "$deps_missing" ] && exit 1
+
+if [ $# -eq 0 ]; then
+    echo "Issuing 'show' command, see -h for more." >&2
+    cmd=show
+else
+    cmd=$1
+    shift
+fi
+
+if [ "$cmd" = "set" ]; then
+     opt=$1
+
+     if [ "$opt" = "fan" ]; then
+         val=$2
+         if [ -z "$val" ]; then
+             usage
+             exit 1
+         fi
+         if [ "$val" = "auto" ]
+         then
+             echo "> autofanctrl"
+             echo "FIXME sensor index is currently hardcoded to 0"
+             sudo ectool autofanctrl 0 # FIXME takes index of sensor to use?
+         else
+             fanrpm=${val//[!0-9]/}
+             if [ -n "$fanrpm" ]; then
+                 echo "> ectool pwmsetfanrpm"
+                 sudo ectool pwmsetfanrpm $fanrpm
+             else
+                usage
+                exit 1
+             fi
+         fi
+     elif [ "$opt" = "sensor" ]; then
+         if [ $# -ne 4 ]; then
+             usage
+             exit 1
+         fi
+         thermal_set $2 $3 $4
+     else
+        usage
+        exit 1
+     fi
+elif [ "$cmd" = "show" ]; then
+    temps_all $1
+elif [ "$cmd" = "watch" ]; then
+    clear
+    # Lulz
+    echo -n -e "\033[s"
+    busy=1
+    while [ -n "$busy" ]; do
+        echo -n -e "\033[1J\033[u"
+        temps_all $1
+        read -t2 -n1 key
+        [ "$key" = "q" ] && unset busy
+    done
+elif [ "$cmd" = "limits" ]; then
+    thermal_conv $1
+else
+     usage
+     exit 1
+fi
