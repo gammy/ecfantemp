@@ -1,72 +1,97 @@
 #!/usr/bin/env bash
-# This is a fan/temperature helper for platforms that need 'ectool', like the
-# AMD Framework laptop and Google Chromebooks.
+# This is a fan/temperature control helper for platforms that need/use 'ectool'
+# In my case, that's my AMD Framework 13 laptop.
+# Google Chromebooks also use it, which is, I suppose, why ectool exists.
+# Do whatever you want with this script.
 #
-# This was born out of pure frustration and was hacked together in a few hours. 
-# Don't judge me for this ugly mess. Judge Google for the clusterfuck that is 
-# ectool instead.
+# By gammy, in 2024. To reach me, try https://github.com/gammy
 #
-# By gammy
+# This was born out of pure frustration and was hacked together rather hastily.
+# Don't judge me, dude! Judge Google for the clusterfuck that is ectool.
+# Come to think of it, it'd probably have been easier to make a patch >_<
+#
+# See `assert_deps` below for dependencies.
 
-# Set a default conversion unit if not specified and not set in the shell
-[ -z "$FRAMEWORK_TEMPS_UNIT" ] && FRAMEWORK_TEMPS_UNIT=C
+DEFAULT_MAX_RPM=7000 # Seems to be the maximum on my Framework 13
+
+# Set a default parameters if not specified and not set in the shell
+[ -n "$FWT_MAX_RPM" ] && FWT_RPM_NAG_OFF=stfu
+[ -z "$FWT_MAX_RPM" ] && FWT_MAX_RPM=$DEFAULT_MAX_RPM
+[ -z "$FWT_TEMP_UNIT" ] && FWT_TEMP_UNIT=C
+[ -z "$FWT_WATCH_INTERVAL" ] && FWT_WATCH_INTERVAL=2
 
 usage() {
     local me=$(basename $0)
     cat << EOF
 An ectool wrapper to simplify fan / temperature reading and configuration.
 
-It displays and accepts temperature parameters in Celsius, Fahrenheit or Kelvin 
+It displays and accepts temperature parameters in Celsius, Fahrenheit or Kelvin
 and doesn't force you to set *all* the bloody thermal parameters every time
 you want to change a single setting. Unlike 'ectool' that was clearly written
-to be used solely by robots, this script tries to make its use more appropriate 
+to be used solely by robots, this script tries to make its use more appropriate
 for human beings.
 
 A temperature parameter that ends with K, C or F will be auto-converted.
-The 'show', 'watch' and 'limit' options also accept a unit as an argument.
-The environment variable FRAMEWORK_TEMPS_UNIT can be overridden to change the 
-default unit; it's currently set to $FRAMEWORK_TEMPS_UNIT.
+The 'show', 'watch' and 'info' options also accept a unit as an argument.
+The environment variable FWT_TEMP_UNIT can be overridden to change the
+default unit; it's currently set to $FWT_TEMP_UNIT.
 
-When run without options, 'show \$FRAMEWORK_TEMPS_UNIT' is issued.
+When run without options, 'show \$FWT_TEMP_UNIT' is issued.
+The following environment variables can also be set to alter behaviour:
+FWT_MAX_RPM, FWT_RPM_NAG_OFF, FWT_TEMP_UNIT, FWT_SHOW_CALLS and FWT_WATCH_RATE.
 
 Usage:
-  $me <watch|show|limits|set> [options] [option] [..]
+  $me <watch|show|info|set> [options] [option] [..]
 
 Options:
-  show    Show the current sensor temperatures, fan speed(s) and common limits.
+  show    Show the current sensor temperatures, fan speed(s) and common info.
   watch   Same as 'show' but runs in a loop a la 'watch'.
-  limits  Show the thermal parameters/values for warn, high, halt, off and max.
+  info    Show the thermal parameters/values for warn, high, halt, off and max.
   set     Set fan or sensor parameters. The syntax is one of:
-          fan    <speed in RPM or 'auto'>
+          fan    <speed in RPM or off/auto/max> [fan ID]
           sensor <sensor number> <warn|high|halt|off|max> <degrees[unit]>
 
 Examples:
     $me show
-    $me set fan 5000
-    $me set fan auto
+    $me set fan 5000   # set fan 0 to 5000 RPM
+    $me set fan auto 2 # set fan 2 to automatic control
     $me set sensor 1 warn 90C
     $me watch K
-    $me limits C
- 
+    $me info C
+
 When the fan speed is set to 'auto', the firmware sets the fan duty cycle
 with the following formula clamped between 0 and 100:
   100 * (Temperature - Fan Off) / (Fan Max - Fan Off)
 Which seems like a pretty stupid formula if you ask me, but it is what it is.
-The parameters in this formula can be viewed with '$me limits'.
+The parameters in this formula can be viewed with '$me info'.
+You won't learn which sensor the automatic control feature uses though. Nice.
 
 EOF
+}
+
+assert_deps() {
+    local dep
+    for dep in bash ectool column sudo bc mktemp seq; do
+        if ! which $dep > /dev/null 2>&1; then
+            local deps_missing=1
+            echo "I need '$dep' to work." >&2
+        fi
+    done
+
+    [ -n "$deps_missing" ] && exit 1
 }
 
 sep_val_unit() {
     local input=$1
     local last=${input: -1}
     local output=${input::-1}
+    local unit
 
     case $last in
         c|C) unit=C;;
         f|F) unit=F;;
         k|K) unit=K;;
-        *) unit="$FRAMEWORK_TEMPS_UNIT"; output=$input;;
+        *) unit="$FWT_TEMP_UNIT"; output=$input;;
     esac
     echo "$output $unit"
 }
@@ -103,6 +128,18 @@ kelvin_to_unit() {
     echo "scale=$dec_places; $kelvin*10/10" | bc -l
 }
 
+compute_ratio() {
+    local fan_min=$1
+    local fan_max=$2
+    if [ "$fan_min" = "$fan_max" ]; then
+        echo "None(min=max)"
+    else
+        local val=` echo "(($fan_max - $fan_min) / 1000) * 100" | bc -l`
+        [ "${val:0:1}" = "." ] && val="0$val"
+        echo ${val:0:3}%
+    fi
+}
+
 thermal_set() {
     local sensor=$1
     local item=$2
@@ -111,6 +148,7 @@ thermal_set() {
     local val=${val_unit[0]}
     local unit=${val_unit[1]}
     local val_k=$(unit_to_kelvin "$val" "$unit")
+    local index
 
     case "$item" in
         warn) index=1 ;;
@@ -155,8 +193,8 @@ your computer might instantly shut off";
     # Usage: thermalset sensor warn [high [shutdown [fan_off [fan_max]]]]
     echo
     echo "Changing $item on sensor $sensor from $oldval K to $val_k K ($val $unit)"
-
-    echo "> ectool thermalset $sensor $k_warn $k_high $k_halt $k_fan_off $k_fan_max"
+    [ -n "$FWT_SHOW_CALL" ] && \
+        echo "> ectool thermalset $sensor $k_warn $k_high $k_halt $k_fan_off $k_fan_max"
     sudo ectool thermalset $sensor $k_warn $k_high $k_halt $k_fan_off $k_fan_max
 
     echo
@@ -166,12 +204,12 @@ your computer might instantly shut off";
 
 thermal_conv() {
     local unit=$1
-    [ -z "$unit" ] && unit=$FRAMEWORK_TEMPS_UNIT
+    [ -z "$unit" ] && unit=$FWT_TEMP_UNIT
 
     local thermalinfo=$(mktemp)
     local thermalinfoc=$(mktemp)
 
-    echo "> ectool thermalget [then reformatting]"
+    [ -n "$FWT_SHOW_CALL" ] && echo "> ectool thermalget"
     sudo ectool thermalget > "$thermalinfo"
 
     cat "$thermalinfo" | head -n-1 | tail -n+2 | while read line; do
@@ -191,11 +229,11 @@ thermal_conv() {
         u_fan_max=$(kelvin_to_unit "$k_fan_max" "$unit")
 
         echo "$sensor ($name),\
-${k_warn} / ${u_warn},\
-${k_high} / ${u_high},\
-${k_halt} / ${u_halt},\
-${k_fan_off} / ${u_fan_off},\
-${k_fan_max} / ${u_fan_max}" >> "$thermalinfoc"
+${u_warn}°${unit} (${k_warn}K),\
+${u_high}°${unit} (${k_high}K),\
+${u_halt}°${unit} (${k_halt}K) ,\
+${u_fan_off}°${unit} (${k_fan_off}K),\
+${u_fan_max}°${unit} (${k_fan_max}K)" >> "$thermalinfoc"
 
     done
 
@@ -203,11 +241,11 @@ ${k_fan_max} / ${u_fan_max}" >> "$thermalinfoc"
 
     column -t -s ',' \
            -C name="Sensor" \
-           -C name="Warn (K/$unit)" \
-           -C name="High (K/$unit)" \
-           -C name="Halt (K/$unit)" \
-           -C name="Fan Off (K/$unit)" \
-           -C name="Fan Max (K/$unit)" \
+           -C name="Warn" \
+           -C name="High" \
+           -C name="Halt" \
+           -C name="Fan Off(<=)" \
+           -C name="Fan Max(>=)" \
            "$thermalinfoc"
 
     rm "$thermalinfoc"
@@ -216,9 +254,9 @@ ${k_fan_max} / ${u_fan_max}" >> "$thermalinfoc"
 temps_all()
 {
     local unit=$1
-    [ -z "$unit" ] && unit=$FRAMEWORK_TEMPS_UNIT
+    [ -z "$unit" ] && unit=$FWT_TEMP_UNIT
 
-    echo "> ectool temps all [then reformatting]"
+    [ -n "$FWT_SHOW_CALL" ] && echo "> ectool temps all"
     local tempinfo=$(mktemp)
     local index=0
 
@@ -229,70 +267,99 @@ temps_all()
         temp_k=${cols[1]}
         # temp_u=${cols[4]} # Omg 'ectool temps' converts to C for us! Discard.
         temp_u=$(kelvin_to_unit "$temp_k" "$unit")
-         ratio=${cols[6]}
-         off_k=${cols[7]//[!0-9]}
-         max_k=${cols[9]//[!0-9]}
-        off_u=$(kelvin_to_unit "$off_k" "$unit")
-        max_u=$(kelvin_to_unit "$max_k" "$unit")
+        # ratio=${cols[6]} # ectool prints ratio as integers -____- Discard.
+        local  off_k=${cols[7]//[!0-9]}
+        local  max_k=${cols[9]//[!0-9]}
+        local ratio=$(compute_ratio "$off_k" "$max_k")
+        local off_u=$(kelvin_to_unit "$off_k" "$unit")
+        local max_u=$(kelvin_to_unit "$max_k" "$unit")
         echo "$index ($name),\
-$temp_k / $temp_u,$ratio,\
-$off_k / $off_u,\
-$max_k / $max_u" >> $tempinfo
+$temp_u°$unit (${temp_k}K),$ratio,\
+$off_u°$unit (${off_k}K),\
+$max_u°$unit (${max_k}K)" >> $tempinfo
         let index=$index+1 # 'ectool temps' neglects to print index, so -__-
     done
 
     column -t -s ',' \
            -C name="Sensor" \
-           -C name="Temperature (K/$unit)" \
-           -C name="Fan Speed" \
-           -C name="Fan Off (K/$unit)" \
-           -C name="Fan Max (K/$unit)" \
+           -C name="Temperature" \
+           -C name="Off-Max Ratio" \
+           -C name="Fan Off(<=)" \
+           -C name="Fan Max(>=)" \
            "$tempinfo"
 
     rm $tempinfo
 
     echo
-    echo "> ectool pwmgetfanrpm all"
-    echo -n "$(sudo ectool pwmgetfanrpm all)     "
+
+    [ -n "$FWT_SHOW_CALL" ] && echo "> ectool pwmgetfanrpm all"
+    sudo ectool pwmgetfanrpm all | while read line; do
+        local cols=($line)
+        local fan_num=${cols[1]}
+        local fan_rpm=${cols[3]}
+        local speed_pct=$(echo "($fan_rpm / $FWT_MAX_RPM) * 100.0" | bc -l)
+        [ "${speed_pct:0:1}" = "." ] && speed_pct="${speed_pct}0"
+        local speed_pct=${speed_pct:0:4}
+        local speed_sub=${speed_pct/.*/}
+        let local dec_div="${speed_pct/.*/}/10"
+        let local dec_rem="10-$dec_div"
+        local bar_full=$(seq -s '=' 0 $dec_div | tr -d '[:digit:]')
+        local bar_empty=$(seq -s ' ' 0 $dec_rem | tr -d '[:digit:]')
+        echo "Fan $fan_num [$bar_full|$bar_empty] $fan_rpm RPM ($speed_pct% duty) "
+    done
     echo
 }
 
-for dep in ectool column sudo bc mktemp; do
-    if ! which $dep > /dev/null 2>&1; then
-        deps_missing=1
-        echo "I need '$dep' to work." >&2
-    fi
-done
+#############################################################################
 
-[ -n "$deps_missing" ] && exit 1
+assert_deps
 
 if [ $# -eq 0 ]; then
     echo "Issuing 'show' command, see -h for more." >&2
+    echo
     cmd=show
 else
     cmd=$1
     shift
 fi
 
+if [ "$cmd" = "show" -o "$cmd" = "watch" -o "$cmd" = "set" ]; then
+    if [ -z "$FWT_RPM_NAG_OFF" ]; then
+        cat << EOF
+Warn: The maximum fan RPM used calculate the duty cycle is hardcoded to \
+$FWT_MAX_RPM.
+      Silence this warning by setting FWT_MAX_RPM or FWT_RPM_NAG_OFF.
+
+EOF
+    fi
+fi
+
+# I mean, why use an exhaustion loop and a case when you can do this...!
+
 if [ "$cmd" = "set" ]; then
      opt=$1
-
      if [ "$opt" = "fan" ]; then
          val=$2
+         fan_id="$3"
          if [ -z "$val" ]; then
              usage
              exit 1
          fi
+         if [ -z "$fan_id" ]; then
+            echo "No fan specified, using fan 0"
+            fan_id=0
+         fi
          if [ "$val" = "auto" ]
          then
-             echo "> autofanctrl"
-             echo "FIXME sensor index is currently hardcoded to 0"
-             sudo ectool autofanctrl 0 # FIXME takes index of sensor to use?
+             [ -n "$FWT_SHOW_CALL" ] && echo "> autofanctrl $fan_id"
+             sudo ectool autofanctrl $fan_id
          else
+             [ "$val" = "off" ] && val=0
+             [ "$val" = "max" ] && val=$FWT_MAX_RPM
              fanrpm=${val//[!0-9]/}
              if [ -n "$fanrpm" ]; then
-                 echo "> ectool pwmsetfanrpm"
-                 sudo ectool pwmsetfanrpm $fanrpm
+                 [ -n "$FWT_SHOW_CALL" ] && echo "> ectool pwmsetfanrpm $fan_id $fanrpm"
+                 sudo ectool pwmsetfanrpm $fan_id $fanrpm
              else
                 usage
                 exit 1
@@ -311,17 +378,14 @@ if [ "$cmd" = "set" ]; then
 elif [ "$cmd" = "show" ]; then
     temps_all $1
 elif [ "$cmd" = "watch" ]; then
-    clear
-    # Lulz
-    echo -n -e "\033[s"
     busy=1
     while [ -n "$busy" ]; do
-        echo -n -e "\033[1J\033[u"
-        temps_all $1
-        read -t2 -n1 key
+        buffer=`clear; temps_all $1` # Do some buffering; reduces flicker a bit
+        echo -e "$buffer"
+        read -t$FWT_WATCH_INTERVAL -n1 key
         [ "$key" = "q" ] && unset busy
     done
-elif [ "$cmd" = "limits" ]; then
+elif [ "$cmd" = "info" ]; then
     thermal_conv $1
 else
      usage
