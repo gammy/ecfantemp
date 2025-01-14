@@ -11,8 +11,6 @@ for human beings.
 If you don't need ectool to control your fan, this probably isn't for you.
 I wrote this to control the fan on my AMD Framework 13 laptop.
 
-You can reach me via github: [https://github.com/gammy](https://github.com/gammy)
-
 ## What does it look like?
 
 ```
@@ -29,6 +27,8 @@ Fan 0 [===|       ] 2259 RPM (32.2% duty)
 ```
 
 ## Help
+
+(This README document may be out of date - best check the script itself)
 
 ```
 $ ecfantemp -h
@@ -62,3 +62,8 @@ Examples:
  * `column` from util-linux (may ship as `bsdextrautils`, `util-linux`, ... you probably have it already)
  * `bc` (usually ships as just `bc`)
  * The regular bandits: `bash`, `seq`, `mktemp`, `sudo`
+
+## Contact
+
+You can reach me via github: [https://github.com/gammy](https://github.com/gammy)
+
