@@ -16,7 +16,7 @@
 # https://opensource.org/license/bsd-2-clause
 
 DEFAULT_MAX_RPM=7000 # Seems to be the maximum on my Framework 13
-ECF_VERSION=0.8
+ECF_VERSION=0.8.1
 
 # Set a default parameters if not specified and not set in the shell
 [ -n "$ECF_MAX_RPM" ] && ECF_RPM_NAG_OFF=stfu
@@ -152,7 +152,7 @@ thermal_set() {
     local val_unit=(`sep_val_unit $3`)
     local val=${val_unit[0]}
     local unit=${val_unit[1]}
-    local val_k`(unit_to_kelvin "$val" "$unit"`
+    local val_k=(`unit_to_kelvin "$val" "$unit"`)
     local index
 
     case "$item" in
