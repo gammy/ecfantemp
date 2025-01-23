@@ -16,13 +16,15 @@
 # https://opensource.org/license/bsd-2-clause
 
 DEFAULT_MAX_RPM=7000 # Seems to be the maximum on my Framework 13
-ECF_VERSION=0.8.1
+ECF_VERSION=0.9devel1
 
 # Set a default parameters if not specified and not set in the shell
 [ -n "$ECF_MAX_RPM" ] && ECF_RPM_NAG_OFF=stfu
 [ -z "$ECF_MAX_RPM" ] && ECF_MAX_RPM=$DEFAULT_MAX_RPM
 [ -z "$ECF_TEMP_UNIT" ] && ECF_TEMP_UNIT=C
 [ -z "$ECF_WATCH_INTERVAL" ] && ECF_WATCH_INTERVAL=2
+[ -z "$ECF_RPM_WIDTH" ] && ECF_FAN_BAR_WIDTH=23
+[ -z "$ECF_RPM_GLYPHS" ] && ECF_RPM_GLYPHS='[= ]' # Fun alts: '▕▒░▏', '▐▒░▌'
 
 assert_deps() {
     local dep
@@ -37,7 +39,7 @@ assert_deps() {
 }
 
 usage() {
-    local me=`basename $0`
+    local me=$(basename "$0")
     cat << EOF
 $me v$ECF_VERSION
 An ectool wrapper to simplify fan / temperature reading and configuration.
@@ -54,8 +56,9 @@ The environment variable ECF_TEMP_UNIT can be overridden to change the
 default unit; it's currently set to $ECF_TEMP_UNIT.
 
 When run without options, 'show \$ECF_TEMP_UNIT' is issued.
-The following environment variables can also be set to alter behaviour:
-ECF_MAX_RPM, ECF_RPM_NAG_OFF, ECF_TEMP_UNIT, ECF_SHOW_CALLS and ECF_WATCH_RATE.
+Several environment variables can be set to alter the behaviour of $me:
+ECF_TEMP_UNIT, ECF_MAX_RPM, ECF_RPM_NAG_OFF, ECF_SHOW_CALL, ECF_WATCH_RATE,
+ECF_FAN_BAR_WIDTH, and ECF_RPM_GLYPHS ('$ECF_RPM_GLYPHS') RTFS for more info.
 
 Usage:
   $me <watch|show|info|set> [options] [option] [..]
@@ -86,73 +89,121 @@ You won't learn which sensor the automatic control feature uses though. Nice.
 EOF
 }
 
+calc_f() {
+    local format="$1"
+    local formula="$2"
+    local sum=$(echo "$formula" | bc -l)
+    # `printf` is useful: It'll include the leading zero even when `bc`
+    # omits it, it'll round the number upwards, and it provides arbit/drawrary
+    # precision in the output, including just returning an integer.
+    printf "$format" "$sum"
+}
+
+portion_f() {
+    local format="$1"
+    local value="$2"
+    local total="$3"
+    local factor="$4"
+    calc_f "$format" "(($value) / ($factor)) * ($total)"
+}
+
+calc_ratio() {
+    local now="$1"
+    local min="$2"
+    local max="$3"
+
+    if [ "$min" = "$max" ]; then
+        echo -n "Min=Max"
+        return
+    fi
+
+   local ratio=$(calc_f "%.1f" "(100 * ($now - $min) / ($max - $min))")
+   local ratio_int=${ratio/.*}
+   (( ratio_int < 0 )) && ratio="0.0 [?]" # Usually the result of a FW fault
+   echo -n "$ratio"
+}
+
 sep_val_unit() {
-    local input=$1
+    local input="$1"
     local last=${input: -1}
     local output=${input::-1}
     local unit
 
     case $last in
-        c|C) unit=C;;
-        f|F) unit=F;;
-        k|K) unit=K;;
-        *) unit="$ECF_TEMP_UNIT"; output=$input;;
+        c|C) unit=C ;;
+        f|F) unit=F ;;
+        k|K) unit=K ;;
+        *)   unit="$ECF_TEMP_UNIT"
+             output="$input" ;;
     esac
     echo "$output $unit"
 }
 
 unit_to_kelvin() {
-    local val=$1
-    local unit=$2
-    local kelvin=$val # Assume input is kelvin
+    local val="$1"
+    local unit="$2"
+    local kelvin="$val" # Assume input is kelvin
 
     case $unit in
-        c|C) val=`echo "273.15 + $val"              | bc -l`;;
-        f|F) val=`echo "273.15 + ($val - 32) * 5/9" | bc -l`;;
+        c|C) val=$(calc_f "%f" "273.15 + $val") ;;
+        f|F) val=$(calc_f "%f" "273.15 + ($val - 32) * 5 / 9") ;;
         k|K) true ;;
         *) true ;;
     esac
 
     # ectool doesn't like decimals, so we chop them off completely.
-    local dec_places=0 # Limit output to 'scale' n decimal places
-    echo "scale=$dec_places; $val*10/10" | bc -l
+    printf "%.0f\n" "$val"
 }
 
 kelvin_to_unit() {
-    local kelvin=$1
-    local unit=$2
+    local kelvin="$1"
+    local unit="$2"
 
     case $unit in
-        c|C) kelvin=`echo " $kelvin - 273.15"             | bc -l`;;
-        f|F) kelvin=`echo "($kelvin - 273.15) * 9/5 + 32" | bc -l`;;
+        c|C) kelvin=$(calc_f "%f" "$kelvin - 273.15") ;;
+        f|F) kelvin=$(calc_f "%f" "($kelvin -273.15) * 9 / 5 + 32") ;;
         k|K) ;;
         *) ;;
     esac
 
-    local dec_places=1 # Limit output to n decimal places
-    echo "scale=$dec_places; $kelvin*10/10" | bc -l
+    printf "%.2f\n" "$kelvin"
 }
 
-compute_ratio() {
-    local fan_min=$1
-    local fan_max=$2
-    if [ "$fan_min" = "$fan_max" ]; then
-        echo "None(min=max)"
-    else
-        local val=` echo "(($fan_max - $fan_min) / 1000) * 100" | bc -l`
-        [ "${val:0:1}" = "." ] && val="0$val"
-        echo ${val:0:3}%
-    fi
+repeat() {
+    local text="$1"
+    local count=${2/.*} # Allow fractions
+    local buf i
+    for ((i = 0; i < count; i++)); do
+        buf="$buf$text"
+    done
+    echo -n "$buf"
+}
+
+draw_bar() {
+    local current="$1"
+    local maximum="$2"
+    local width="($3-2)"; # Defer subtraction of endstops ('[]')
+    local beg_gfx="${ECF_RPM_GLYPHS:0:1}"
+    local bar_gfx="${ECF_RPM_GLYPHS:1:1}"
+    local pad_gfx="${ECF_RPM_GLYPHS:2:1}"
+    local end_gfx="${ECF_RPM_GLYPHS:3:1}"
+    [[ "$current" -gt "$maximum" ]] && maximum="$current" # Basic sanity
+    local num_blocks=$(portion_f "%.0f" "$current" "$width" "$maximum")
+    local num_blanks=$(portion_f "%.0f" "($maximum-$current)" "$width" "$maximum")
+    ((num_blocks == num_blanks)) && ((num_blanks++))
+    local filled_gfx=$(repeat "$bar_gfx" "$num_blocks")
+    local padded_gfx=$(repeat "$pad_gfx" "$num_blanks")
+    echo -n "${beg_gfx}${filled_gfx}${padded_gfx}${end_gfx}"
 }
 
 thermal_set() {
-    local sensor=$1
-    local item=$2
+    local sensor="$1"
+    local item="$2"
 
-    local val_unit=(`sep_val_unit $3`)
-    local val=${val_unit[0]}
-    local unit=${val_unit[1]}
-    local val_k=(`unit_to_kelvin "$val" "$unit"`)
+    local val_unit=($(sep_val_unit "$3"))
+    local val="${val_unit[0]}"
+    local unit="${val_unit[1]}"
+    local val_k=$(unit_to_kelvin "$val" "$unit")
     local index
 
     case "$item" in
@@ -173,65 +224,81 @@ your computer might instantly shut off";
             ;;
     esac
 
-    echo "Old:"
-    thermal_conv $unit
+    thermal_conv "$sensor" "$unit"
 
-    local cols=(`sudo ectool thermalget | head -n-1 | tail -n+2 \
-        | grep "^\s*${sensor}\s"`)
-    local cols_old=(${cols[@]})
-    local oldval=${cols[$index]}
+    local cols=($(sudo ectool thermalget | head -n-1 | tail -n+2 \
+        | grep "^\s*${sensor}\s"))
+    local cols_old=("${cols[@]}")
+    local oldval_k="${cols[$index]}"
+    local oldval_u=$(kelvin_to_unit "$oldval_k" "$unit")
 
-    if [ "$oldval" = "$val_k" ]; then
-        echo "$item on sensor $sensor is already set to $val_k K ($val $unit)"
+
+    if [ "$oldval_k" = "$val_k" ]; then
+        printf "%s on sensor %s is already set to %s°%s (%sK)\n" \
+            "$item" "$sensor" "$val" "$unit" "$val_k"
         return
     fi
 
-    cols[$index]=$val_k
+    cols[$index]="$val_k"
 
-    local k_warn=${cols[1]}
-    local k_high=${cols[2]}
-    local k_halt=${cols[3]}
-    local k_fan_off=${cols[4]}
-    local k_fan_max=${cols[5]}
+    for col in "${cols[@]}"; do
+        if [ -z "$col" ]; then
+            echo "Error: Unexpected empty column in response!" >&2
+            echo "Columns from 'ectool thermalget':" >&2
+            for c in "${cols[@]}"; do
+                [ -z "$c" ] && echo "'$c' <-- empty" >&2 || echo "'$c'" >&2
+            done
+            echo "Stopping." >&2
+            exit 1
+        fi
+    done
+
+    local k_warn="${cols[1]}"
+    local k_high="${cols[2]}"
+    local k_halt="${cols[3]}"
+    local k_fan_off="${cols[4]}"
+    local k_fan_max="${cols[5]}"
 
     # UGHhhhhhh you need to pass all the parameters! Come ON!
     # Usage: thermalset sensor warn [high [shutdown [fan_off [fan_max]]]]
-    echo
-    echo "Changing $item on sensor $sensor from $oldval K to $val_k K ($val $unit)"
+    printf "Changing %s on sensor %s from %s°%s (%sK) to %s°%s (%sK):\n" \
+        "$item" "$sensor" "$oldval_u" "$unit" "$oldval_k" "$val" "$unit" "$val_k"
+
     [ -n "$ECF_SHOW_CALL" ] && \
         echo "> ectool thermalset $sensor $k_warn $k_high $k_halt $k_fan_off $k_fan_max"
-    sudo ectool thermalset $sensor $k_warn $k_high $k_halt $k_fan_off $k_fan_max
+    sudo ectool thermalset "$sensor" "$k_warn" "$k_high" "$k_halt" "$k_fan_off" "$k_fan_max"
 
-    echo
-    echo "New:"
-    thermal_conv $unit
+    thermal_conv "$sensor" "$unit" | grep -v ^Sensor
 }
 
 thermal_conv() {
-    local unit=$1
+    local only_sensor="$1"
+    local unit="$2"
     [ -z "$unit" ] && unit=$ECF_TEMP_UNIT
+    #[ "$one_sensor" = "all" ] && req_sensor=
 
-    local thermalinfo=`mktemp`
-    local thermalinfoc=`mktemp`
+    local thermalinfo=$(mktemp)
+    local thermalinfoc=$(mktemp)
 
     [ -n "$ECF_SHOW_CALL" ] && echo "> ectool thermalget"
     sudo ectool thermalget > "$thermalinfo"
 
     cat "$thermalinfo" | head -n-1 | tail -n+2 | while read line; do
         cols=($line)
-        sensor=${cols[0]}
-        k_warn=${cols[1]}
-        k_high=${cols[2]}
-        k_halt=${cols[3]}
-        k_fan_off=${cols[4]}
-        k_fan_max=${cols[5]}
-        name=${cols[6]}
+        sensor="${cols[0]}"
+        [[ -n $only_sensor && $sensor -ne $only ]] && continue
+        k_warn="${cols[1]}"
+        k_high="${cols[2]}"
+        k_halt="${cols[3]}"
+        k_fan_off="${cols[4]}"
+        k_fan_max="${cols[5]}"
+        name="${cols[6]}"
 
-        u_warn=`kelvin_to_unit "$k_warn" "$unit"`
-        u_high=`kelvin_to_unit "$k_high" "$unit"`
-        u_halt=`kelvin_to_unit "$k_halt" "$unit"`
-        u_fan_off=`kelvin_to_unit "$k_fan_off" "$unit"`
-        u_fan_max=`kelvin_to_unit "$k_fan_max" "$unit"`
+        u_warn=$(kelvin_to_unit "$k_warn" "$unit")
+        u_high=$(kelvin_to_unit "$k_high" "$unit")
+        u_halt=$(kelvin_to_unit "$k_halt" "$unit")
+        u_fan_off=$(kelvin_to_unit "$k_fan_off" "$unit")
+        u_fan_max=$(kelvin_to_unit "$k_fan_max" "$unit")
 
         echo "$sensor ($name),\
 ${u_warn}°${unit} (${k_warn}K),\
@@ -256,32 +323,32 @@ ${u_fan_max}°${unit} (${k_fan_max}K)" >> "$thermalinfoc"
     rm "$thermalinfoc"
 }
 
-temps_all()
+show_temps()
 {
-    local unit=$1
+    local unit="$1"
     [ -z "$unit" ] && unit=$ECF_TEMP_UNIT
 
     [ -n "$ECF_SHOW_CALL" ] && echo "> ectool temps all"
-    local tempinfo=`mktemp`
+    local tempinfo=$(mktemp)
     local index=0
 
     # Parse the mangled inconsistent mess that ectool outputs
     sudo ectool temps all | tail -n+2 | sed 's/ and / /' | while read line; do
-        cols=($line)
-          name=${cols[0]}
-        temp_k=${cols[1]}
-        # temp_u=${cols[4]} # Omg 'ectool temps' converts to C for us! Discard.
-        temp_u=`kelvin_to_unit "$temp_k" "$unit"`
-        # ratio=${cols[6]} # ectool prints ratio as integers -____- Discard.
-        local  off_k=${cols[7]//[!0-9]}
-        local  max_k=${cols[9]//[!0-9]}
-        local ratio=`compute_ratio "$off_k" "$max_k"`
-        local off_u=`kelvin_to_unit "$off_k" "$unit"`
-        local max_u=`kelvin_to_unit "$max_k" "$unit"`
+          cols=($line)
+          name="${cols[0]}"
+        temp_k="${cols[1]}"
+      # temp_u="${cols[4]}" # Omg 'ectool temps' converts to C for us! Discard.
+        temp_u=$(kelvin_to_unit "$temp_k" "$unit")
+       # ratio=${cols[6]} # ectool prints ratio as integers -____- Discard.
+         off_k=${cols[7]//[!0-9]}
+         max_k=${cols[9]//[!0-9]}
+         ratio=$(calc_ratio "$temp_k" "$off_k" "$max_k")
+         off_u=$(kelvin_to_unit "$off_k" "$unit")
+         max_u=$(kelvin_to_unit "$max_k" "$unit")
         echo "$index ($name),\
 $temp_u°$unit (${temp_k}K),$ratio,\
 $off_u°$unit (${off_k}K),\
-$max_u°$unit (${max_k}K)" >> $tempinfo
+$max_u°$unit (${max_k}K)" >> "$tempinfo"
         let index=$index+1 # 'ectool temps' neglects to print index, so -__-
     done
 
@@ -293,26 +360,29 @@ $max_u°$unit (${max_k}K)" >> $tempinfo
            -C name="Fan Max(>=)" \
            "$tempinfo"
 
-    rm $tempinfo
+    rm "$tempinfo"
 
     echo
+}
 
+show_fans() {
     [ -n "$ECF_SHOW_CALL" ] && echo "> ectool pwmgetfanrpm all"
     sudo ectool pwmgetfanrpm all | while read line; do
-        local cols=($line)
-        local fan_num=${cols[1]}
-        local fan_rpm=${cols[3]}
-        local speed_pct=`echo "($fan_rpm / $ECF_MAX_RPM) * 100.0" | bc -l`
-        [ "${speed_pct:0:1}" = "." ] && speed_pct="${speed_pct}0"
-        local speed_pct=${speed_pct:0:4}
-        local speed_sub=${speed_pct/.*/}
-        let local dec_div="${speed_pct/.*/}/10"
-        let local dec_rem="10-$dec_div"
-        local bar_full=`seq -s '=' 0 $dec_div | tr -d '[:digit:]'`
-        local bar_empty=`seq -s ' ' 0 $dec_rem | tr -d '[:digit:]'`
-        echo "Fan $fan_num [$bar_full|$bar_empty] $fan_rpm RPM ($speed_pct% duty) "
+        cols=($line)
+        fan_num="${cols[1]}"
+        fan_rpm="${cols[3]}"
+        duty_pct=$(portion_f "%.1f" "$fan_rpm" 100 "$ECF_MAX_RPM") # 1 decimal
+        bar=$(draw_bar "$fan_rpm" "$ECF_MAX_RPM" "$ECF_FAN_BAR_WIDTH")
+        printf "Fan #%d %s %d RPM (%1.1f%% duty)" \
+            "$fan_num" "$bar" "$fan_rpm" "$duty_pct"
     done
     echo
+}
+
+show_select() {
+    # TODO allow selecting one or more temps, or one or more fans!
+    show_temps "$1"
+    show_fans
 }
 
 #############################################################################
@@ -324,11 +394,11 @@ if [ $# -eq 0 ]; then
     echo
     cmd=show
 else
-    cmd=$1
+    cmd="$1"
     shift
 fi
 
-if [ "$cmd" = "show" -o "$cmd" = "watch" -o "$cmd" = "set" ]; then
+if [[ "$cmd" = "show" || "$cmd" = "watch" || "$cmd" = "set" ]]; then
     if [ -z "$ECF_RPM_NAG_OFF" ]; then
         cat << EOF
 Warn: The maximum fan RPM used to calculate the duty cycle is hardcoded to \
@@ -357,14 +427,14 @@ if [ "$cmd" = "set" ]; then
          if [ "$val" = "auto" ]
          then
              [ -n "$ECF_SHOW_CALL" ] && echo "> autofanctrl $fan_id"
-             sudo ectool autofanctrl $fan_id
+             sudo ectool autofanctrl "$fan_id"
          else
              [ "$val" = "off" ] && val=0
              [ "$val" = "max" ] && val=$ECF_MAX_RPM
              fanrpm=${val//[!0-9]/}
              if [ -n "$fanrpm" ]; then
                  [ -n "$ECF_SHOW_CALL" ] && echo "> ectool pwmsetfanrpm $fan_id $fanrpm"
-                 sudo ectool pwmsetfanrpm $fan_id $fanrpm
+                 sudo ectool pwmsetfanrpm "$fan_id" "$fanrpm"
              else
                 usage
                 exit 1
@@ -375,23 +445,24 @@ if [ "$cmd" = "set" ]; then
              usage
              exit 1
          fi
-         thermal_set $2 $3 $4
+         thermal_set "$2" "$3" "$4"
      else
         usage
         exit 1
      fi
 elif [ "$cmd" = "show" ]; then
-    temps_all $1
+    show_select "$@"
 elif [ "$cmd" = "watch" ]; then
     busy=1
     while [ -n "$busy" ]; do
-        buffer=`clear; temps_all $1` # Do some buffering; reduces flicker a bit
+        # Do some buffering; reduces flicker a bit
+        buffer=$(clear; show_select "$@")
         echo -e "$buffer"
-        read -t$ECF_WATCH_INTERVAL -n1 key
+        read -t "$ECF_WATCH_INTERVAL" -n1 key
         [ "$key" = "q" ] && unset busy
     done
 elif [ "$cmd" = "info" ]; then
-    thermal_conv $1
+    thermal_conv "" "$1"
 else
      usage
      exit 1

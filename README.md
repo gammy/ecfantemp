@@ -18,12 +18,12 @@ $ ecfantemp
 Issuing 'show' command, see -h for more.
 
 Sensor               Temperature    Off-Max Ratio  Fan Off(<=)    Fan Max(>=)
-0 (local_f75303@4d)  40.8°C (314K)  3.0%           39.8°C (313K)  69.8°C (343K)
-1 (cpu_f75303@4d)    40.8°C (314K)  0.8%           45.8°C (319K)  53.8°C (327K)
-2 (ddr_f75303@4d)    41.8°C (315K)  4.0%           39.8°C (313K)  79.8°C (353K)
-3 (cpu@4c)           40.8°C (314K)  4.0%           39.8°C (313K)  79.8°C (353K)
+0 (local_f75303@4d)  40.8°C (314K)  3.3%           39.8°C (313K)  69.8°C (343K)
+1 (cpu_f75303@4d)    40.8°C (314K)  0.0% [?]       45.8°C (319K)  53.8°C (327K)
+2 (ddr_f75303@4d)    41.8°C (315K)  5.0%           39.8°C (313K)  79.8°C (353K)
+3 (cpu@4c)           40.8°C (314K)  2.5%           39.8°C (313K)  79.8°C (353K)
 
-Fan 0 [===|       ] 2259 RPM (32.2% duty)
+Fan #0 [=========            ] 2960 RPM (42.3% duty)
 ```
 
 ## Help
@@ -32,10 +32,24 @@ Fan 0 [===|       ] 2259 RPM (32.2% duty)
 
 ```
 $ ecfantemp -h
-...
+ecfantemp v0.9devel1
+An ectool wrapper to simplify fan / temperature reading and configuration.
+
+It displays and accepts temperature parameters in Celsius, Fahrenheit or Kelvin
+and doesn't force you to set *all* the bloody thermal parameters every time
+you want to change a single setting. Unlike 'ectool' that was clearly written
+to be used solely by robots, this script tries to make its use more appropriate
+for human beings.
+
+A temperature parameter that ends with K, C or F will be auto-converted.
+The 'show', 'watch' and 'info' options also accept a unit as an argument.
+The environment variable ECF_TEMP_UNIT can be overridden to change the
+default unit; it's currently set to C.
+
 When run without options, 'show $ECF_TEMP_UNIT' is issued.
-The following environment variables can also be set to alter behaviour:
-ECF_MAX_RPM, ECF_RPM_NAG_OFF, ECF_TEMP_UNIT, ECF_SHOW_CALLS and ECF_WATCH_RATE.
+Several environment variables can be set to alter the behaviour of ecfantemp:
+ECF_TEMP_UNIT, ECF_MAX_RPM, ECF_RPM_NAG_OFF, ECF_SHOW_CALL, ECF_WATCH_RATE,
+ECF_FAN_BAR_WIDTH, and ECF_RPM_GLYPHS ('[= ]') RTFS for more info.
 
 Usage:
   ecfantemp <watch|show|info|set> [options] [option] [..]
@@ -55,6 +69,7 @@ Examples:
     ecfantemp set sensor 1 warn 90C
     ecfantemp watch K
     ecfantemp info C
+...
 ```
 
 ## Requirements
