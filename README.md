@@ -17,6 +17,9 @@ I wrote this to control the fan on my AMD Framework 13 laptop.
 $ ecfantemp
 Issuing 'show' command, see -h for more.
 
+Warn: The maximum fan RPM used to calculate the duty cycle is hardcoded to 7000.
+      Silence this warning by setting ECF_MAX_RPM or ECF_RPM_NAG_OFF.
+
 Sensor               Temperature    Off-Max Ratio  Fan Off(<=)    Fan Max(>=)
 0 (local_f75303@4d)  40.8°C (314K)  3.3%           39.8°C (313K)  69.8°C (343K)
 1 (cpu_f75303@4d)    40.8°C (314K)  0.0% [?]       45.8°C (319K)  53.8°C (327K)
@@ -24,6 +27,21 @@ Sensor               Temperature    Off-Max Ratio  Fan Off(<=)    Fan Max(>=)
 3 (cpu@4c)           40.8°C (314K)  2.5%           39.8°C (313K)  79.8°C (353K)
 
 Fan #0 [=========            ] 2960 RPM (42.3% duty)
+```
+
+```
+$ export EXF_MAX_RPM=7000 ECF_SPARSE=1 ECF_RPM_GLYPHS='▕▒░▏'
+
+$ ecfantemp
+Issuing 'show' command, see -h for more.
+
+Sensor               Temperature
+0 (local_f75303@4d)  38.85°C
+1 (cpu_f75303@4d)    41.85°C
+2 (ddr_f75303@4d)    39.85°C
+3 (cpu@4c)           41.85°C
+
+Fan #0 ▕▒▒▒▒▒▒▒░░░░░░░░░░░░░░▏ 2244 RPM (32.1% duty)
 ```
 
 ## Help
@@ -49,7 +67,8 @@ default unit; it's currently set to C.
 When run without options, 'show $ECF_TEMP_UNIT' is issued.
 Several environment variables can be set to alter the behaviour of ecfantemp:
 ECF_TEMP_UNIT, ECF_MAX_RPM, ECF_RPM_NAG_OFF, ECF_SHOW_CALL, ECF_WATCH_RATE,
-ECF_FAN_BAR_WIDTH, and ECF_RPM_GLYPHS ('[= ]') RTFS for more info.
+ECF_FAN_BAR_WIDTH, and ECF_RPM_GLYPHS ('[= ]') and ECF_SPARSE.
+RTFS for more info.
 
 Usage:
   ecfantemp <watch|show|info|set> [options] [option] [..]

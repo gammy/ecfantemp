@@ -25,6 +25,7 @@ ECF_VERSION=0.9devel1
 [ -z "$ECF_WATCH_INTERVAL" ] && ECF_WATCH_INTERVAL=2
 [ -z "$ECF_RPM_WIDTH" ] && ECF_FAN_BAR_WIDTH=23
 [ -z "$ECF_RPM_GLYPHS" ] && ECF_RPM_GLYPHS='[= ]' # Fun alts: '▕▒░▏', '▐▒░▌'
+[ -z "$ECF_SPARSE" ] && ECF_SPARSE=
 
 assert_deps() {
     local dep
@@ -58,7 +59,8 @@ default unit; it's currently set to $ECF_TEMP_UNIT.
 When run without options, 'show \$ECF_TEMP_UNIT' is issued.
 Several environment variables can be set to alter the behaviour of $me:
 ECF_TEMP_UNIT, ECF_MAX_RPM, ECF_RPM_NAG_OFF, ECF_SHOW_CALL, ECF_WATCH_RATE,
-ECF_FAN_BAR_WIDTH, and ECF_RPM_GLYPHS ('$ECF_RPM_GLYPHS') RTFS for more info.
+ECF_FAN_BAR_WIDTH, and ECF_RPM_GLYPHS ('$ECF_RPM_GLYPHS') and ECF_SPARSE.
+RTFS for more info.
 
 Usage:
   $me <watch|show|info|set> [options] [option] [..]
@@ -328,10 +330,10 @@ show_temps()
     local unit="$1"
     [ -z "$unit" ] && unit=$ECF_TEMP_UNIT
 
-    [ -n "$ECF_SHOW_CALL" ] && echo "> ectool temps all"
     local tempinfo=$(mktemp)
     local index=0
 
+    [ -n "$ECF_SHOW_CALL" ] && echo "> ectool temps all"
     # Parse the mangled inconsistent mess that ectool outputs
     sudo ectool temps all | tail -n+2 | sed 's/ and / /' | while read line; do
           cols=($line)
@@ -339,29 +341,39 @@ show_temps()
         temp_k="${cols[1]}"
       # temp_u="${cols[4]}" # Omg 'ectool temps' converts to C for us! Discard.
         temp_u=$(kelvin_to_unit "$temp_k" "$unit")
-       # ratio=${cols[6]} # ectool prints ratio as integers -____- Discard.
-         off_k=${cols[7]//[!0-9]}
-         max_k=${cols[9]//[!0-9]}
-         ratio=$(calc_ratio "$temp_k" "$off_k" "$max_k")
-         off_u=$(kelvin_to_unit "$off_k" "$unit")
-         max_u=$(kelvin_to_unit "$max_k" "$unit")
-        echo "$index ($name),\
-$temp_u°$unit (${temp_k}K),$ratio,\
-$off_u°$unit (${off_k}K),\
-$max_u°$unit (${max_k}K)" >> "$tempinfo"
-        let index=$index+1 # 'ectool temps' neglects to print index, so -__-
+      #  ratio=${cols[6]} # ectool prints ratio as integers. Discard.
+
+        if [ -z "$ECF_SPARSE" ]; then
+            off_k=${cols[7]//[!0-9]}
+            max_k=${cols[9]//[!0-9]}
+            ratio=$(calc_ratio "$temp_k" "$off_k" "$max_k")
+            off_u=$(kelvin_to_unit "$off_k" "$unit")
+            max_u=$(kelvin_to_unit "$max_k" "$unit")
+            printf "%d (%s),%s°%s (%sK),%s,%s°%s (%sK),%s°%s (%sK),\n" \
+                   "$index"  "$name" \
+                   "$temp_u" "$unit" "$temp_k" "$ratio" \
+                   "$off_u"  "$unit" "$off_k" \
+                   "$max_u"  "$unit" "$max_k" >> "$tempinfo"
+        else
+            echo "$index ($name),$temp_u°$unit" >> "$tempinfo"
+        fi
+
+        ((index++)) # 'ectool temps' neglects to print index.
     done
 
-    column -t -s ',' \
-           -C name="Sensor" \
-           -C name="Temperature" \
-           -C name="Off-Max Ratio" \
-           -C name="Fan Off(<=)" \
-           -C name="Fan Max(>=)" \
-           "$tempinfo"
+    local col_names=("Sensor" "Temperature")
+    if [ -z "$ECF_SPARSE" ]; then
+        col_names+=("Off-Max Ratio" "Fan Off(<=)" "Fan Max(>=)")
+    fi
+
+    local col_args=('-t' '-s' ",")
+    for col in "${col_names[@]}"; do
+        col_args+=("-C" name="$col")
+    done
+
+    column "${col_args[@]}" "$tempinfo"
 
     rm "$tempinfo"
-
     echo
 }
 
